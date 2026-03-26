@@ -1,6 +1,6 @@
 name: Deploy to QA
 
-on:
+"on":
   push:
     branches:
       - 'release/v*'

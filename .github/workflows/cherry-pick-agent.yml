@@ -1,6 +1,6 @@
 name: Cherry-Pick Agent
 
-on:
+"on":
   pull_request:
     types: [closed]
     branches: [develop]

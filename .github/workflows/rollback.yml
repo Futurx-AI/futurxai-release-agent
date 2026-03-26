@@ -1,6 +1,6 @@
 name: Manual Rollback
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       rollback_commit:
