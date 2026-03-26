@@ -26,12 +26,6 @@ jobs:
           echo "name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
           echo "📦 Release branch: ${BRANCH_NAME}"
 
-      - name: Safety check — PR was actually merged
-        if: github.event.pull_request.merged != true
-        run: |
-          echo "::error::PR was closed but not merged. Aborting."
-          exit 1
-
       - name: Checkout develop
         uses: actions/checkout@v4
         with:
@@ -85,7 +79,7 @@ jobs:
           MERGE_SHA="${{ steps.verify_commit.outputs.merge_sha }}"
           echo "🍒 Cherry-picking commit ${MERGE_SHA}..."
 
-          if ! git cherry-pick "$MERGE_SHA" --no-edit 2>&1; then
+          if ! git cherry-pick -m 1 --no-edit "$MERGE_SHA" 2>&1; then
             CONFLICT_FILES=$(git diff --name-only --diff-filter=U || true)
             git cherry-pick --abort || true
 

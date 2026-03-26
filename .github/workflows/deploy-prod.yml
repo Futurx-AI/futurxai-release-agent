@@ -1,9 +1,9 @@
 name: Deploy to Production
 
 "on":
-  pull_request:
-    types: [labeled]
-    branches: [develop]
+  workflow_run:
+    workflows: ["Deploy to QA"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   deploy-prod:
-    if: github.event.label.name == 'qa-approved'
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -25,25 +25,32 @@ jobs:
       - name: Find the release branch
         id: find_release
         run: |
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
-
-          # Find the release branch that contains the cherry-picked commit
-          RELEASE_BRANCH=$(git branch -r --list 'origin/release/v*' | sort -r | head -1 | xargs)
+          # Use the branch that triggered the QA workflow
+          RELEASE_BRANCH="${{ github.event.workflow_run.head_branch }}"
 
           if [ -z "$RELEASE_BRANCH" ]; then
-            echo "::error::No release branch found."
-            gh pr comment "$PR_NUMBER" \
-              --body "❌ **Production Deploy Agent Failed**
-
-          Could not find a release branch to merge into main."
+            echo "::error::No release branch found from workflow_run context."
             exit 1
           fi
 
-          # Strip origin/ prefix
-          BRANCH_NAME="${RELEASE_BRANCH#origin/}"
-          echo "branch=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
-          echo "📦 Found release branch: ${BRANCH_NAME}"
+          echo "branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "📦 Found release branch: ${RELEASE_BRANCH}"
+
+      - name: Find original PR number
+        id: find_pr
+        run: |
+          git fetch origin "${{ steps.find_release.outputs.branch }}"
+          COMMIT_MSG=$(git log "origin/${{ steps.find_release.outputs.branch }}" -1 --pretty=%B)
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "📌 Original PR: #${PR_NUMBER}"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Could not find original PR number."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -65,10 +72,12 @@ jobs:
 
           if ! git merge "origin/${RELEASE_BRANCH}" --no-ff -m "Merge ${RELEASE_BRANCH} into main [deploy-prod]"; then
             echo "::error::Merge conflict when merging ${RELEASE_BRANCH} into main."
-            gh pr comment "${{ github.event.pull_request.number }}" \
-              --body "❌ **Production Deploy Agent Failed**
+            if [ "${{ steps.find_pr.outputs.found }}" == "true" ]; then
+              gh pr comment "${{ steps.find_pr.outputs.pr_number }}" \
+                --body "❌ **Production Deploy Agent Failed**
 
           Merge conflict when merging \`${RELEASE_BRANCH}\` into \`main\`. Manual intervention required."
+            fi
             exit 1
           fi
 
@@ -93,10 +102,11 @@ jobs:
           echo "✅ Production deployment complete."
 
       - name: Comment success on PR
+        if: steps.find_pr.outputs.found == 'true'
         run: |
           RELEASE_BRANCH="${{ steps.find_release.outputs.branch }}"
           DEPLOY_SHA="${{ steps.merge.outputs.sha }}"
-          gh pr comment "${{ github.event.pull_request.number }}" \
+          gh pr comment "${{ steps.find_pr.outputs.pr_number }}" \
             --body "🚀 **Deployed to production as ${RELEASE_BRANCH}. Commit: ${DEPLOY_SHA}**
 
           The release branch has been merged into \`main\` and deployed to production."
@@ -113,11 +123,13 @@ jobs:
           git reset --hard "${{ steps.rollback_point.outputs.sha }}"
           git push origin main --force
 
-          gh pr comment "${{ github.event.pull_request.number }}" \
-            --body "⚠️ **Production Deploy Agent — Rollback Executed**
+          if [ "${{ steps.find_pr.outputs.found }}" == "true" ]; then
+            gh pr comment "${{ steps.find_pr.outputs.pr_number }}" \
+              --body "⚠️ **Production Deploy Agent — Rollback Executed**
 
           Deployment failed. \`main\` has been rolled back to \`${{ steps.rollback_point.outputs.sha }}\`.
 
           Please investigate the failure in [Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

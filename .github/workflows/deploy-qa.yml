@@ -61,7 +61,7 @@ jobs:
           echo "Last commit message: ${COMMIT_MSG}"
 
           # Try to extract PR number from commit message (e.g., "Merge pull request #42")
-          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '#\K[0-9]+' | head -1 || true)
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
 
           if [ -z "$PR_NUMBER" ]; then
             echo "⚠️ Could not find original PR number from commit message."
@@ -102,7 +102,7 @@ jobs:
       - name: Find original PR and report failure
         run: |
           COMMIT_MSG=$(git log -1 --pretty=%B)
-          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '#\K[0-9]+' | head -1 || true)
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
 
           if [ -n "$PR_NUMBER" ]; then
             gh pr edit "$PR_NUMBER" --add-label "do-not-release"
