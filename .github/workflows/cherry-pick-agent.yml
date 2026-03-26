@@ -1,0 +1,125 @@
+name: Cherry-Pick Agent
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  cherry-pick:
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'ready-for-release')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate release branch name
+        id: branch
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          BRANCH_NAME="release/v${DATE}-${{ github.run_number }}"
+          echo "name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "📦 Release branch: ${BRANCH_NAME}"
+
+      - name: Safety check — PR was actually merged
+        if: github.event.pull_request.merged != true
+        run: |
+          echo "::error::PR was closed but not merged. Aborting."
+          exit 1
+
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Safety check — merge commit exists on develop
+        id: verify_commit
+        run: |
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "merge_sha=${MERGE_SHA}" >> "$GITHUB_OUTPUT"
+
+          if ! git branch --contains "$MERGE_SHA" | grep -q 'develop'; then
+            echo "::error::Merge commit ${MERGE_SHA} not found on develop."
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --body "❌ **Cherry-Pick Agent Failed**
+
+          Merge commit \`${MERGE_SHA}\` was not found on the \`develop\` branch. Aborting cherry-pick."
+            exit 1
+          fi
+          echo "✅ Merge commit ${MERGE_SHA} verified on develop."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Safety check — release branch does not already exist
+        run: |
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "::error::Release branch ${BRANCH} already exists."
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --body "❌ **Cherry-Pick Agent Failed**
+
+          Release branch \`${BRANCH}\` already exists. Aborting."
+            exit 1
+          fi
+          echo "✅ Release branch ${BRANCH} does not exist yet."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release branch from main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -b "${{ steps.branch.outputs.name }}" origin/main
+          echo "✅ Created branch ${{ steps.branch.outputs.name }} from main."
+
+      - name: Cherry-pick the merge commit
+        id: cherry_pick
+        run: |
+          MERGE_SHA="${{ steps.verify_commit.outputs.merge_sha }}"
+          echo "🍒 Cherry-picking commit ${MERGE_SHA}..."
+
+          if ! git cherry-pick "$MERGE_SHA" --no-edit 2>&1; then
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U || true)
+            git cherry-pick --abort || true
+
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --body "❌ **Cherry-Pick Agent — Conflict Detected**
+
+          Failed to cherry-pick merge commit \`${MERGE_SHA}\` onto \`${{ steps.branch.outputs.name }}\`.
+
+          **Conflicting files:**
+          \`\`\`
+          ${CONFLICT_FILES}
+          \`\`\`
+
+          Please resolve the conflict manually and create the release branch."
+            exit 1
+          fi
+
+          echo "✅ Cherry-pick successful."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push release branch
+        run: |
+          git push origin "${{ steps.branch.outputs.name }}"
+          echo "🚀 Pushed ${{ steps.branch.outputs.name }} to origin."
+
+      - name: Comment on PR
+        run: |
+          MERGE_SHA="${{ steps.verify_commit.outputs.merge_sha }}"
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "✅ **Cherry-Pick Agent Succeeded**
+
+          Release branch \`${{ steps.branch.outputs.name }}\` created with commit \`${MERGE_SHA}\`.
+
+          Next: QA deployment will begin automatically."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

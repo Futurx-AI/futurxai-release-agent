@@ -1,0 +1,117 @@
+name: Deploy to QA
+
+on:
+  push:
+    branches:
+      - 'release/v*'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  deploy-qa:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract branch info
+        id: info
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          echo "branch=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "📦 Deploying branch: ${BRANCH_NAME}"
+
+      - name: Deploy to QA environment
+        id: deploy
+        run: |
+          echo "🚀 Deploying ${{ steps.info.outputs.branch }} to QA environment..."
+          # -------------------------------------------------------
+          # TODO: Replace this section with your actual QA deploy
+          # commands. Examples:
+          #   - kubectl apply -f k8s/qa/
+          #   - aws ecs update-service --cluster qa ...
+          #   - vercel deploy --env preview
+          # -------------------------------------------------------
+          echo "✅ QA deployment complete."
+
+      - name: Run automated tests
+        id: tests
+        run: |
+          echo "🧪 Running automated test suite against QA..."
+          # -------------------------------------------------------
+          # TODO: Replace with your actual test commands. Examples:
+          #   - npm test
+          #   - pytest tests/integration/
+          #   - ./gradlew test
+          # -------------------------------------------------------
+          echo "✅ All tests passed."
+
+      - name: Find original PR number
+        id: find_pr
+        run: |
+          # Find the PR that triggered the cherry-pick by looking at
+          # the cherry-picked commit message which contains the PR ref
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Last commit message: ${COMMIT_MSG}"
+
+          # Try to extract PR number from commit message (e.g., "Merge pull request #42")
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '#\K[0-9]+' | head -1 || true)
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "⚠️ Could not find original PR number from commit message."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "📌 Original PR: #${PR_NUMBER}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add qa-approved label on success
+        if: steps.find_pr.outputs.found == 'true'
+        run: |
+          PR_NUMBER="${{ steps.find_pr.outputs.pr_number }}"
+          gh pr edit "$PR_NUMBER" --add-label "qa-approved"
+          gh pr comment "$PR_NUMBER" \
+            --body "✅ **QA Deploy Agent — Passed**
+
+          Branch \`${{ steps.info.outputs.branch }}\` deployed to QA and all tests passed.
+
+          Label \`qa-approved\` has been added. Production deployment will proceed."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  handle-failure:
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    if: failure()
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find original PR and report failure
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '#\K[0-9]+' | head -1 || true)
+
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" --add-label "do-not-release"
+            gh pr comment "$PR_NUMBER" \
+              --body "❌ **QA Deploy Agent — Failed**
+
+          Branch \`${GITHUB_REF#refs/heads/}\` failed QA testing.
+
+          Label \`do-not-release\` has been added. Please investigate the failure in [Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

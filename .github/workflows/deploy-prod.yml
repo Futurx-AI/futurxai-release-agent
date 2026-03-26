@@ -1,0 +1,123 @@
+name: Deploy to Production
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [develop]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  deploy-prod:
+    if: github.event.label.name == 'qa-approved'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find the release branch
+        id: find_release
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+
+          # Find the release branch that contains the cherry-picked commit
+          RELEASE_BRANCH=$(git branch -r --list 'origin/release/v*' | sort -r | head -1 | xargs)
+
+          if [ -z "$RELEASE_BRANCH" ]; then
+            echo "::error::No release branch found."
+            gh pr comment "$PR_NUMBER" \
+              --body "❌ **Production Deploy Agent Failed**
+
+          Could not find a release branch to merge into main."
+            exit 1
+          fi
+
+          # Strip origin/ prefix
+          BRANCH_NAME="${RELEASE_BRANCH#origin/}"
+          echo "branch=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "📦 Found release branch: ${BRANCH_NAME}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record current main HEAD for rollback
+        id: rollback_point
+        run: |
+          PREV_SHA=$(git rev-parse HEAD)
+          echo "sha=${PREV_SHA}" >> "$GITHUB_OUTPUT"
+          echo "🔖 Rollback point: ${PREV_SHA}"
+
+      - name: Merge release branch into main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          RELEASE_BRANCH="${{ steps.find_release.outputs.branch }}"
+          git fetch origin "$RELEASE_BRANCH"
+
+          if ! git merge "origin/${RELEASE_BRANCH}" --no-ff -m "Merge ${RELEASE_BRANCH} into main [deploy-prod]"; then
+            echo "::error::Merge conflict when merging ${RELEASE_BRANCH} into main."
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --body "❌ **Production Deploy Agent Failed**
+
+          Merge conflict when merging \`${RELEASE_BRANCH}\` into \`main\`. Manual intervention required."
+            exit 1
+          fi
+
+          git push origin main
+          NEW_SHA=$(git rev-parse HEAD)
+          echo "sha=${NEW_SHA}" >> "$GITHUB_OUTPUT"
+          echo "✅ Merged ${RELEASE_BRANCH} into main at ${NEW_SHA}."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to production
+        id: deploy
+        run: |
+          echo "🚀 Deploying main to production..."
+          # -------------------------------------------------------
+          # TODO: Replace this section with your actual production
+          # deploy commands. Examples:
+          #   - kubectl apply -f k8s/prod/
+          #   - aws ecs update-service --cluster prod ...
+          #   - vercel deploy --prod
+          # -------------------------------------------------------
+          echo "✅ Production deployment complete."
+
+      - name: Comment success on PR
+        run: |
+          RELEASE_BRANCH="${{ steps.find_release.outputs.branch }}"
+          DEPLOY_SHA="${{ steps.merge.outputs.sha }}"
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "🚀 **Deployed to production as ${RELEASE_BRANCH}. Commit: ${DEPLOY_SHA}**
+
+          The release branch has been merged into \`main\` and deployed to production."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rollback on deploy failure
+        if: failure() && steps.merge.outcome == 'success'
+        run: |
+          echo "⚠️ Production deploy failed. Rolling back main to ${{ steps.rollback_point.outputs.sha }}..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git reset --hard "${{ steps.rollback_point.outputs.sha }}"
+          git push origin main --force
+
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "⚠️ **Production Deploy Agent — Rollback Executed**
+
+          Deployment failed. \`main\` has been rolled back to \`${{ steps.rollback_point.outputs.sha }}\`.
+
+          Please investigate the failure in [Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

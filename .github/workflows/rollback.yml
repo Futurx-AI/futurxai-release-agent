@@ -1,0 +1,104 @@
+name: Manual Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_commit:
+        description: 'Commit SHA to rollback main to'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number to notify (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate input
+        run: |
+          SHA="${{ github.event.inputs.rollback_commit }}"
+          if [ ${#SHA} -lt 7 ]; then
+            echo "::error::Invalid commit SHA: ${SHA}. Must be at least 7 characters."
+            exit 1
+          fi
+          echo "🔖 Rolling back to: ${SHA}"
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify commit exists
+        run: |
+          SHA="${{ github.event.inputs.rollback_commit }}"
+          if ! git cat-file -t "$SHA" > /dev/null 2>&1; then
+            echo "::error::Commit ${SHA} does not exist in the repository."
+            exit 1
+          fi
+          echo "✅ Commit ${SHA} verified."
+
+      - name: Record current main HEAD
+        id: current
+        run: |
+          CURRENT_SHA=$(git rev-parse HEAD)
+          echo "sha=${CURRENT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "📌 Current main HEAD: ${CURRENT_SHA}"
+
+      - name: Rollback main to specified commit
+        run: |
+          SHA="${{ github.event.inputs.rollback_commit }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git reset --hard "$SHA"
+          git push origin main --force
+
+          echo "✅ main has been reset to ${SHA}."
+
+      - name: Redeploy production
+        run: |
+          echo "🚀 Redeploying production from rolled-back main..."
+          # -------------------------------------------------------
+          # TODO: Replace with your actual production deploy command
+          # -------------------------------------------------------
+          echo "✅ Production redeployment complete."
+
+      - name: Notify via PR comment
+        if: github.event.inputs.pr_number != ''
+        run: |
+          PR_NUMBER="${{ github.event.inputs.pr_number }}"
+          ROLLBACK_SHA="${{ github.event.inputs.rollback_commit }}"
+          PREV_SHA="${{ steps.current.outputs.sha }}"
+
+          gh pr comment "$PR_NUMBER" \
+            --body "⚠️ **Manual Rollback Executed**
+
+          | Detail | Value |
+          |--------|-------|
+          | **Rolled back from** | \`${PREV_SHA}\` |
+          | **Rolled back to** | \`${ROLLBACK_SHA}\` |
+          | **Triggered by** | @${{ github.actor }} |
+          | **Run** | [Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          Production has been redeployed from the rolled-back commit."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post summary
+        run: |
+          echo "## 🔄 Rollback Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Detail | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Previous HEAD** | \`${{ steps.current.outputs.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Rolled back to** | \`${{ github.event.inputs.rollback_commit }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Actor** | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
